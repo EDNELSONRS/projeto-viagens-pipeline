@@ -41,7 +41,7 @@ A pasta `data/`, o arquivo `.env` e o ambiente `.venv` são locais. Executar `ge
 
 As tabelas Raw preservam todas as colunas dos CSVs como `VARCHAR`, sem restrições. `1_extrair.py` procura `data/viagens_2025_6meses.zip`. Se esse arquivo não existe, utiliza o `DRIVE_FILE_ID` do `.env` para baixá-lo.
 
-Os cabeçalhos são conferidos e os CSVs são transmitidos ao PostgreSQL por COPY, em fluxo, sem carregar os arquivos inteiros em memória. A carga executa TRUNCATE antes da inserção e ocorre em uma transação, com tratamento de exceções. A implementação atual usa leitura em fluxo, sem lotes explícitos de DataFrames.
+Os cabeçalhos são conferidos e os CSVs são transmitidos ao PostgreSQL por COPY, em fluxo, sem carregar os arquivos inteiros em memória. A carga executa TRUNCATE antes da inserção e ocorre em uma transação, com tratamento de exceções. A leitura utiliza o buffer do `copy_expert`, transmitindo os dados progressivamente ao PostgreSQL sem carregar o CSV inteiro em memória. O tamanho padrão desse buffer é 8192, conforme a [documentação do psycopg2](https://www.psycopg.org/docs/cursor.html#cursor.copy_expert).
 
 ### Silver
 
@@ -151,6 +151,12 @@ Para testar o download, mantenha uma cópia de segurança do ZIP e deixe o camin
 
 Para testar a reexecução, repita extração e transformação e confira se as contagens permanecem iguais. As contagens, isoladamente, não comprovam a correção de todas as análises.
 
+## Resultados e interpretação
+
+A carga e a transformação produziram 1.879.385 registros em cada camada, com as mesmas contagens por entidade na Raw e na Silver. Esse resultado confirma a reconciliação das quantidades para esta versão da base; a validade dos cálculos e das relações deve ser conferida separadamente.
+
+Os resultados das sete perguntas de negócio são apresentados nas tabelas e gráficos do notebook. Ao interpretar os rankings, considere o custo líquido por viagem, o total de pagamentos e a quantidade de trechos como medidas distintas. Um órgão com muitas viagens ou trechos não necessariamente apresenta o maior custo médio.
+
 ## Observações e limites
 
 - Algumas viagens iniciadas no primeiro semestre de 2025 possuem datas finais em 2026; esses registros são mantidos.
@@ -167,6 +173,7 @@ Versione os scripts, o notebook com suas saídas, este README, `requirements.txt
 .env
 .venv/
 .venv-1/
+.vscode/
 venv/
 __pycache__/
 *.py[cod]
@@ -182,7 +189,6 @@ O link entregue no AVA deve ser o do repositório GitHub. O link do Drive neste 
 
 ## Melhorias futuras
 
-- Implementar lotes explícitos de leitura para atender literalmente à exigência de blocos do enunciado.
 - Ampliar o tratamento de falhas e retentativas no download.
 - Registrar logs com duração, contagens e registros rejeitados.
 - Automatizar verificações de conversão, duplicidade, relacionamentos e totais.
