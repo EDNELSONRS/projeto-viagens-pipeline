@@ -41,8 +41,13 @@ A pasta `data/`, o arquivo `.env` e o ambiente `.venv` são locais. Executar `ge
 
 As tabelas Raw preservam todas as colunas dos CSVs como `VARCHAR`, sem restrições. `1_extrair.py` procura `data/viagens_2025_6meses.zip`. Se esse arquivo não existe, utiliza o `DRIVE_FILE_ID` do `.env` para baixá-lo.
 
-Os cabeçalhos são conferidos e os CSVs são transmitidos ao PostgreSQL por COPY, em fluxo, sem carregar os arquivos inteiros em memória. A carga executa TRUNCATE antes da inserção e ocorre em uma transação, com tratamento de exceções. A leitura utiliza o buffer do `copy_expert`, transmitindo os dados progressivamente ao PostgreSQL sem carregar o CSV inteiro em memória. O tamanho padrão desse buffer é 8192, conforme a [documentação do psycopg2](https://www.psycopg.org/docs/cursor.html#cursor.copy_expert).
+Antes de conectar ao banco, o script confere a integridade do ZIP, a presença de um único CSV de cada tipo e seus cabeçalhos. Essa validação também ocorre quando o ZIP já existe na pasta `data/`.
 
+Quando precisa baixar a base, o script utiliza o ID do Drive sem login ou cookies. O download fica em uma pasta temporária e só é publicado como `data/viagens_2025_6meses.zip` após a validação. Em caso de falha, o temporário da execução é removido.
+
+Os CSVs são transmitidos ao PostgreSQL por COPY, com buffer de leitura configurado em 8192, sem carregar os arquivos inteiros em memória. Os quatro TRUNCATE e COPY ocorrem em uma única transação. Se uma carga falhar, a transação é revertida; as mensagens de sucesso só são exibidas após a confirmação da carga completa. A conexão é fechada ao final.
+
+Falhas previstas de rede, acesso ao Drive, arquivo, estrutura dos CSVs ou banco são tratadas com uma mensagem `Falha na extração` e código de saída 1. Após corrigir a causa, execute novamente `python 1_extrair.py`.
 ### Silver
 
 `2_transformar.py` converte os textos para datas, inteiros e valores decimais. As tabelas possuem chaves primárias, chaves estrangeiras e restrições de integridade. São calculados:
@@ -56,7 +61,11 @@ Somente na composição do total, componentes ausentes contam como zero. Os camp
 
 ### Gold
 
-O notebook cria `gold_resumo_viagem` e `gold_resumo_viagem_vw`, com uma linha por viagem. Pagamentos, passagens e trechos são agregados antes das junções para evitar multiplicação de valores. As consultas detalhadas de pagamentos e trechos usam a Silver; a consulta do total por órgão pagador faz uma junção com a view Gold.
+O notebook cria a tabela `gold_resumo_viagem`, com chave primária em `id_viagem`, e a view `gold_resumo_viagem_vw`, ambas com uma linha por viagem. Pagamentos, passagens e trechos são agregados antes das junções para evitar multiplicação de valores.
+
+A view de resumo alimenta quatro views agregadas: `gold_pagamento_tipo_vw`, `gold_transporte_vw`, `gold_destino_uf_vw` e `gold_orgao_pagador_vw`. As perguntas 4 a 7 consultam exclusivamente essas views Gold, que utilizam JOIN e GROUP BY para obter os indicadores.
+
+A reconstrução dos objetos Gold ocorre em uma transação. Raw e Silver são utilizadas como fontes de leitura. A última célula compara contagens e totais entre as camadas e verifica que a Gold possui uma linha por viagem.
 
 ## Instalação e configuração
 
@@ -145,7 +154,7 @@ Na versão fornecida da base, as cargas Raw e Silver produziram:
 | Passagem | 167.260 | 167.260 |
 | Trecho | 763.349 | 763.349 |
 
-São 1.879.385 registros em cada camada. Após executar o notebook, a tabela e a view Gold devem ter uma linha por viagem: 341.860 registros nesta base.
+São 1.879.385 registros em cada camada. Após executar o notebook, `gold_resumo_viagem` e `gold_resumo_viagem_vw` devem ter uma linha por viagem: 341.860 registros nesta base. As quatro views agregadas têm uma linha por categoria de pagamento, transporte, UF ou órgão pagador.
 
 Para testar o download, mantenha uma cópia de segurança do ZIP e deixe o caminho `data/viagens_2025_6meses.zip` sem arquivo. Configure `DRIVE_FILE_ID` no `.env` e execute `python 1_extrair.py`. O resultado esperado é o download seguido da carga. Esse teste substitui a Raw; execute novamente a transformação e o notebook para atualizar Silver e Gold.
 
@@ -153,10 +162,23 @@ Para testar a reexecução, repita extração e transformação e confira se as 
 
 ## Resultados e interpretação
 
-A carga e a transformação produziram 1.879.385 registros em cada camada, com as mesmas contagens por entidade na Raw e na Silver. Esse resultado confirma a reconciliação das quantidades para esta versão da base; a validade dos cálculos e das relações deve ser conferida separadamente.
+Na versão fornecida da base, Raw e Silver possuem 1.879.385 registros cada. A tabela de resumo Gold possui 341.860 viagens. O notebook confere as contagens, a unicidade das viagens e os totais de custo, pagamentos e trechos. As sete respostas foram verificadas e as seis figuras foram salvas no notebook executado.
 
-Os resultados das sete perguntas de negócio são apresentados nas tabelas e gráficos do notebook. Ao interpretar os rankings, considere o custo líquido por viagem, o total de pagamentos e a quantidade de trechos como medidas distintas. Um órgão com muitas viagens ou trechos não necessariamente apresenta o maior custo médio.
+| Pergunta | Resultado principal |
+|---|---|
+| Maior custo por órgão superior | Ministério da Justiça e Segurança Pública: R$ 486.933.121,65. |
+| Maior custo médio por roteiro | Abu Dabi/Emirados Árabes, Riad/Arábia Saudita, Rio de Janeiro/RJ: R$ 245.852,80, referente a uma viagem. |
+| Viagem de maior duração | Processo 0000000000020699856: 383 dias, com R$ 0,00 registrados como custo total. |
+| Maior média por tipo de pagamento | DIÁRIAS: R$ 2.078,28 por registro. |
+| Transporte mais frequente | Veículo Oficial: 386.424 trechos. |
+| UF de destino mais frequente | São Paulo: 82.722 ocorrências em trechos. |
+| Maior total por órgão pagador | Fundo Nacional de Segurança Pública: R$ 278.481.047,89. |
 
+Na pergunta 2, destino significa o roteiro textual completo; o custo não é repartido entre cidades. Os códigos Roteiro 1, 2 e 3 no gráfico correspondem aos textos completos da tabela apresentada logo acima. Uma média baseada em uma viagem não permite generalizar o custo daquele destino.
+
+Na pergunta 3, o custo zero é um valor registrado na fonte e não comprova ausência de despesas. Duração e custo são apresentados separadamente, com suas respectivas unidades.
+
+Custos de viagens, pagamentos e frequências representam medidas distintas. Os rankings, isoladamente, não permitem concluir eficiência ou causalidade. As interpretações exibidas no notebook são calculadas a partir das consultas executadas.
 ## Observações e limites
 
 - Algumas viagens iniciadas no primeiro semestre de 2025 possuem datas finais em 2026; esses registros são mantidos.
@@ -189,8 +211,8 @@ O link entregue no AVA deve ser o do repositório GitHub. O link do Drive neste 
 
 ## Melhorias futuras
 
-- Ampliar o tratamento de falhas e retentativas no download.
+- Implementar retentativas para falhas transitórias no download.
 - Registrar logs com duração, contagens e registros rejeitados.
 - Automatizar verificações de conversão, duplicidade, relacionamentos e totais.
 - Padronizar nomes de destinos antes de análises por cidade.
-- Expandir as conclusões dos rankings financeiros com base nas saídas verificadas do notebook.
+- Aprofundar a interpretação dos rankings considerando volume de viagens, características dos roteiros e evolução mensal.
